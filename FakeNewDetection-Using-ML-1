@@ -1,1 +1,788 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.10.14","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"gpu","dataSources":[{"sourceId":9412550,"sourceType":"datasetVersion","datasetId":5716008}],"dockerImageVersionId":30761,"isInternetEnabled":false,"language":"python","sourceType":"notebook","isGpuEnabled":true}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"# This Python 3 environment comes with many helpful analytics libraries installed\n# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python\n# For example, here's several helpful packages to load\n\nimport numpy as np # linear algebra\nimport pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)\n\n# Input data files are available in the read-only \"../input/\" directory\n# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory\n\nimport os\nfor dirname, _, filenames in os.walk('/kaggle/input'):\n    for filename in filenames:\n        print(os.path.join(dirname, filename))\n\n# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using \"Save & Run All\" \n# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session","metadata":{"_uuid":"8f2839f25d086af736a60e9eeb907d3b93b6e0e5","_cell_guid":"b1076dfc-b9ad-4769-8c92-a6c4dae69d19","execution":{"iopub.status.busy":"2024-09-16T13:42:18.550004Z","iopub.execute_input":"2024-09-16T13:42:18.550308Z","iopub.status.idle":"2024-09-16T13:42:18.926136Z","shell.execute_reply.started":"2024-09-16T13:42:18.550268Z","shell.execute_reply":"2024-09-16T13:42:18.924858Z"},"trusted":true},"execution_count":1,"outputs":[{"name":"stdout","text":"/kaggle/input/liar-fake-news-detection/myfile.csv\n","output_type":"stream"}]},{"cell_type":"markdown","source":"# Imports and Configuration ","metadata":{}},{"cell_type":"code","source":"# Cell 1: Imports and Configuration\n\nimport re\nimport time\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\nfrom matplotlib.figure import Figure\nfrom joblib import Parallel, delayed, dump\nimport joblib\nimport seaborn as sns\n\nfrom sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold\nfrom sklearn.feature_extraction.text import TfidfVectorizer\nfrom sklearn.metrics import (\n    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report\n)\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier\nfrom sklearn.tree import DecisionTreeClassifier\n\nimport tensorflow as tf\nfrom tensorflow.keras.preprocessing.text import Tokenizer\nfrom tensorflow.keras.preprocessing.sequence import pad_sequences\nfrom tensorflow.keras.models import Sequential\nfrom tensorflow.keras.layers import Embedding, LSTM, SimpleRNN, GRU, Conv1D, GlobalMaxPooling1D, Dense\nfrom tensorflow.keras.optimizers import Adam\nimport keras_tuner as kt\n\nimport warnings\nwarnings.filterwarnings('ignore')\n\n# Configuration and Constants\nDATA_PATH = '/kaggle/input/liar-fake-news-detection/myfile.csv'  \nEMBEDDING_DIM = 100\nEPOCHS = 10\nBATCH_SIZE = 64\nRANDOM_STATE = 42\nMODEL_DIR = 'saved_models'\n\n# Create model directory if it doesn't exist\nimport os\nif not os.path.exists(MODEL_DIR):\n    os.makedirs(MODEL_DIR)","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:42:18.928157Z","iopub.execute_input":"2024-09-16T13:42:18.928696Z","iopub.status.idle":"2024-09-16T13:42:33.042926Z","shell.execute_reply.started":"2024-09-16T13:42:18.928650Z","shell.execute_reply":"2024-09-16T13:42:33.042036Z"},"trusted":true},"execution_count":2,"outputs":[]},{"cell_type":"markdown","source":"# Verify GPU Availability","metadata":{}},{"cell_type":"code","source":"import tensorflow as tf\n\n# List available GPUs\ngpus = tf.config.list_physical_devices('GPU')\nif gpus:\n    print(f\"GPUs Available: {len(gpus)}\")\n    for gpu in gpus:\n        print(f\" - {gpu.name}\")\n    # Set memory growth to prevent TensorFlow from allocating all GPU memory\n    try:\n        for gpu in gpus:\n            tf.config.experimental.set_memory_growth(gpu, True)\n        print(\"Memory growth set for GPUs.\")\n    except RuntimeError as e:\n        print(e)\nelse:\n    print(\"No GPU available. Running on CPU.\")","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:42:33.044087Z","iopub.execute_input":"2024-09-16T13:42:33.044625Z","iopub.status.idle":"2024-09-16T13:42:33.251028Z","shell.execute_reply.started":"2024-09-16T13:42:33.044590Z","shell.execute_reply":"2024-09-16T13:42:33.249972Z"},"trusted":true},"execution_count":3,"outputs":[{"name":"stdout","text":"GPUs Available: 1\n - /physical_device:GPU:0\nMemory growth set for GPUs.\n","output_type":"stream"}]},{"cell_type":"markdown","source":"## Enable Mixed Precision","metadata":{}},{"cell_type":"code","source":"from tensorflow.keras import mixed_precision\n\n# Enable mixed precision\nmixed_precision.set_global_policy('mixed_float16')\n\nprint(f\"Mixed precision policy set to: {mixed_precision.global_policy().name}\")\n","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:42:33.254357Z","iopub.execute_input":"2024-09-16T13:42:33.255510Z","iopub.status.idle":"2024-09-16T13:42:33.330871Z","shell.execute_reply.started":"2024-09-16T13:42:33.255454Z","shell.execute_reply":"2024-09-16T13:42:33.329748Z"},"trusted":true},"execution_count":4,"outputs":[{"name":"stdout","text":"Mixed precision policy set to: mixed_float16\n","output_type":"stream"}]},{"cell_type":"markdown","source":"# Data Loading and Preprocessing","metadata":{}},{"cell_type":"code","source":"# Cell 4: Data Loading and Preprocessing\n\ndef load_data(path):\n    df = pd.read_csv(path)\n    return df\n\ndef preprocess_text(text):\n    text = text.lower()\n    text = re.sub(r'https?://\\S+|www\\.\\S+', '', text)  # Remove URLs\n    text = re.sub(r'<.*?>', '', text)                 # Remove HTML tags\n    text = re.sub(r'[^\\w\\s]', '', text)               # Remove punctuation\n    text = re.sub(r'\\d', '', text)                    # Remove digits\n    text = re.sub(r'\\n', ' ', text)                   # Replace newline with space\n    return text.strip()\n\n# Load data\nprint(\"Loading data...\")\ndf = load_data(DATA_PATH)\nprint(f\"Data loaded with {df.shape[0]} records.\")\n\n# Preprocess text\nprint(\"Preprocessing text data...\")\ndf['text'] = df['text'].astype(str).apply(preprocess_text)\nprint(\"Preprocessing completed.\")\n\n# Check class distribution\nprint(\"Class distribution:\")\nprint(df['label'].value_counts())","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:42:33.341923Z","iopub.execute_input":"2024-09-16T13:42:33.342245Z","iopub.status.idle":"2024-09-16T13:42:44.877161Z","shell.execute_reply.started":"2024-09-16T13:42:33.342212Z","shell.execute_reply":"2024-09-16T13:42:44.876231Z"},"trusted":true},"execution_count":5,"outputs":[{"name":"stdout","text":"Loading data...\nData loaded with 44866 records.\nPreprocessing text data...\nPreprocessing completed.\nClass distribution:\nlabel\n0                                                                                                                                                                                                                                                                                                                                                                       23432\n1                                                                                                                                                                                                                                                                                                                                                                       21400\n we see Mickey and Mallory driving in an RV as parents. The idea here is that the Knoxes represent a future society                                                                                                                                                                                                                                                         2\n another controversial nugget in the JFK files was a memo written by FBI Director Hoover after Oswald was shot by Ruby. The memo revealed that the head of FBI was concerned that the bureau needed to  convince  the public that Oswald acted alone in the Kennedy assassination. A portion of Hoover s memo read The thing I am concerned about                           2\n chance and human agency. We have only to reflect upon defunct glacial despotisms such as the USSR or East Germany to realize that nothing is forever.Throughout history                                                                                                                                                                                                    2\n while criticizing their conservative counterparts.National Committee for Voting Integrity: This group opposes  the implementation of proof of citizenship and photo identification requirements for eligible electors in American elections as the means of assuring election integrity. National Council for Research on Women: This group supports big government        2\n Democratic Congressman Barney Frank                                                                                                                                                                                                                                                                                                                                        1\n it s certainly an old lesson by now. Depending on what your view of communism is                                                                                                                                                                                                                                                                                           1\n it s much easier to scapegoat an existential enemy for every systemic and institutional crisis affecting America. Whole industries have been spun out of this old habit: the intelligence industry                                                                                                                                                                         1\n which owns the Mandalay Bay hotel near where the shooting occurred                                                                                                                                                                                                                                                                                                         1\n like the fraudulent story published in The Post                                                                                                                                                                                                                                                                                                                            1\n and is heavily funded by Democracy Alliance                                                                                                                                                                                                                                                                                                                                1\nName: count, dtype: int64\n","output_type":"stream"}]},{"cell_type":"markdown","source":"# Feature Extraction","metadata":{}},{"cell_type":"code","source":"# Cell 5: Feature Extraction with Data Cleaning\n\nimport pandas as pd\nimport re\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.feature_extraction.text import TfidfVectorizer\nfrom tensorflow.keras.preprocessing.text import Tokenizer\nfrom tensorflow.keras.preprocessing.sequence import pad_sequences\n\n# Function to preprocess text\ndef preprocess_text(text):\n    text = text.lower()\n    text = re.sub(r'https?://\\S+|www\\.\\S+', '', text)  # Remove URLs\n    text = re.sub(r'<.*?>', '', text)                 # Remove HTML tags\n    text = re.sub(r'[^\\w\\s]', '', text)               # Remove punctuation\n    text = re.sub(r'\\d', '', text)                    # Remove digits\n    text = re.sub(r'\\n', ' ', text)                   # Replace newline with space\n    return text.strip()\n\n# Check for NaN values in the 'label' and 'text' columns\nnum_nan_labels = df['label'].isnull().sum()\nnum_nan_text = df['text'].isnull().sum()\nprint(f\"Number of NaN values in 'label' column before cleaning: {num_nan_labels}\")\nprint(f\"Number of NaN values in 'text' column before cleaning: {num_nan_text}\")\n\n# Remove rows with NaN in 'label' or 'text'\ndf_clean = df.dropna(subset=['label', 'text'])\n\n# Verify that there are no NaN values in 'label' and 'text' after cleaning\nnum_nan_labels_after = df_clean['label'].isnull().sum()\nnum_nan_text_after = df_clean['text'].isnull().sum()\nprint(f\"Number of NaN values in 'label' column after cleaning: {num_nan_labels_after}\")\nprint(f\"Number of NaN values in 'text' column after cleaning: {num_nan_text_after}\")\n\n# Check class distribution after cleaning\nclass_counts = df_clean['label'].value_counts()\nprint(\"\\nClass distribution after cleaning:\")\nprint(class_counts)\n\n# Identify classes with at least 2 samples\nvalid_classes = class_counts[class_counts >= 2].index.tolist()\n\n# Filter the dataframe to include only valid classes\ndf_clean = df_clean[df_clean['label'].isin(valid_classes)]\n\n# Recheck class distribution after filtering\nclass_counts_after_filter = df_clean['label'].value_counts()\nprint(\"\\nClass distribution after filtering classes with <2 samples:\")\nprint(class_counts_after_filter)\n\n# Assign features and target from the cleaned dataframe\nX = df_clean['text']\ny = df_clean['label']\n\n# Check if at least two classes are present\nif y.nunique() < 2:\n    raise ValueError(\"Not enough classes with at least two samples each for stratified splitting.\")\nTEST_SIZE = .25\n# Perform train-test split with stratification to maintain class distribution\nX_train, X_test, y_train, y_test = train_test_split(\n    X, y,\n    test_size=TEST_SIZE,\n    random_state=RANDOM_STATE,\n    stratify=y\n)\n\nprint(f\"\\nTraining set: {X_train.shape[0]} samples\")\nprint(f\"Testing set: {X_test.shape[0]} samples\")\n\n# --- Feature Extraction Steps ---\n\n# TF-IDF Vectorization for scikit-learn models\nprint(\"\\nVectorizing text data using TF-IDF...\")\ntfidf_vectorizer = TfidfVectorizer(max_features=10000)\nX_train_tfidf = tfidf_vectorizer.fit_transform(X_train)\nX_test_tfidf = tfidf_vectorizer.transform(X_test)\nprint(\"TF-IDF vectorization completed.\")\n\n# Tokenization and padding for TensorFlow models\nprint(\"\\nTokenizing and padding text data for TensorFlow models...\")\ntokenizer = Tokenizer()\ntokenizer.fit_on_texts(X_train)\nsequences_train = tokenizer.texts_to_sequences(X_train)\nsequences_test = tokenizer.texts_to_sequences(X_test)\n\nvocab_size = len(tokenizer.word_index) + 1\nmax_length = max(len(seq) for seq in sequences_train)\nX_train_padded = pad_sequences(sequences_train, maxlen=max_length, padding='post')\nX_test_padded = pad_sequences(sequences_test, maxlen=max_length, padding='post')\nprint(f\"Vocabulary Size: {vocab_size}\")\nprint(f\"Maximum Sequence Length: {max_length}\")","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:45:02.281200Z","iopub.execute_input":"2024-09-16T13:45:02.281582Z","iopub.status.idle":"2024-09-16T13:45:43.196744Z","shell.execute_reply.started":"2024-09-16T13:45:02.281545Z","shell.execute_reply":"2024-09-16T13:45:43.195679Z"},"trusted":true},"execution_count":7,"outputs":[{"name":"stdout","text":"Number of NaN values in 'label' column before cleaning: 20\nNumber of NaN values in 'text' column before cleaning: 0\nNumber of NaN values in 'label' column after cleaning: 0\nNumber of NaN values in 'text' column after cleaning: 0\n\nClass distribution after cleaning:\nlabel\n0                                                                                                                                                                                                                                                                                                                                                                       23432\n1                                                                                                                                                                                                                                                                                                                                                                       21400\n we see Mickey and Mallory driving in an RV as parents. The idea here is that the Knoxes represent a future society                                                                                                                                                                                                                                                         2\n another controversial nugget in the JFK files was a memo written by FBI Director Hoover after Oswald was shot by Ruby. The memo revealed that the head of FBI was concerned that the bureau needed to  convince  the public that Oswald acted alone in the Kennedy assassination. A portion of Hoover s memo read The thing I am concerned about                           2\n chance and human agency. We have only to reflect upon defunct glacial despotisms such as the USSR or East Germany to realize that nothing is forever.Throughout history                                                                                                                                                                                                    2\n while criticizing their conservative counterparts.National Committee for Voting Integrity: This group opposes  the implementation of proof of citizenship and photo identification requirements for eligible electors in American elections as the means of assuring election integrity. National Council for Research on Women: This group supports big government        2\n Democratic Congressman Barney Frank                                                                                                                                                                                                                                                                                                                                        1\n it s certainly an old lesson by now. Depending on what your view of communism is                                                                                                                                                                                                                                                                                           1\n it s much easier to scapegoat an existential enemy for every systemic and institutional crisis affecting America. Whole industries have been spun out of this old habit: the intelligence industry                                                                                                                                                                         1\n which owns the Mandalay Bay hotel near where the shooting occurred                                                                                                                                                                                                                                                                                                         1\n like the fraudulent story published in The Post                                                                                                                                                                                                                                                                                                                            1\n and is heavily funded by Democracy Alliance                                                                                                                                                                                                                                                                                                                                1\nName: count, dtype: int64\n\nClass distribution after filtering classes with <2 samples:\nlabel\n0                                                                                                                                                                                                                                                                                                                                                                       23432\n1                                                                                                                                                                                                                                                                                                                                                                       21400\n another controversial nugget in the JFK files was a memo written by FBI Director Hoover after Oswald was shot by Ruby. The memo revealed that the head of FBI was concerned that the bureau needed to  convince  the public that Oswald acted alone in the Kennedy assassination. A portion of Hoover s memo read The thing I am concerned about                           2\n we see Mickey and Mallory driving in an RV as parents. The idea here is that the Knoxes represent a future society                                                                                                                                                                                                                                                         2\n chance and human agency. We have only to reflect upon defunct glacial despotisms such as the USSR or East Germany to realize that nothing is forever.Throughout history                                                                                                                                                                                                    2\n while criticizing their conservative counterparts.National Committee for Voting Integrity: This group opposes  the implementation of proof of citizenship and photo identification requirements for eligible electors in American elections as the means of assuring election integrity. National Council for Research on Women: This group supports big government        2\nName: count, dtype: int64\n\nTraining set: 33630 samples\nTesting set: 11210 samples\n\nVectorizing text data using TF-IDF...\nTF-IDF vectorization completed.\n\nTokenizing and padding text data for TensorFlow models...\nVocabulary Size: 181683\nMaximum Sequence Length: 5424\n","output_type":"stream"}]},{"cell_type":"markdown","source":"## Optimize Data Pipeline for TensorFlow Models","metadata":{}},{"cell_type":"code","source":"# Cell 6: Optimize Data Pipeline for TensorFlow Models\n\n# Convert labels to numpy arrays\ny_train_tf = y_train.values\ny_test_tf = y_test.values\n\n# Create TensorFlow datasets\ntrain_dataset = tf.data.Dataset.from_tensor_slices((X_train_padded, y_train_tf))\ntrain_dataset = train_dataset.shuffle(buffer_size=1024).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)\n\ntest_dataset = tf.data.Dataset.from_tensor_slices((X_test_padded, y_test_tf))\ntest_dataset = test_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)\n\nprint(\"TensorFlow datasets created with optimized data pipeline.\")\n","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:48:21.332329Z","iopub.execute_input":"2024-09-16T13:48:21.333229Z","iopub.status.idle":"2024-09-16T13:48:22.593536Z","shell.execute_reply.started":"2024-09-16T13:48:21.333185Z","shell.execute_reply":"2024-09-16T13:48:22.592465Z"},"trusted":true},"execution_count":8,"outputs":[{"name":"stdout","text":"TensorFlow datasets created with optimized data pipeline.\n","output_type":"stream"}]},{"cell_type":"markdown","source":"## Hyperparameter Tuning for scikit-learn Models","metadata":{}},{"cell_type":"code","source":"# Cell 7: Hyperparameter Tuning for scikit-learn Models (Multiclass Support)\n\nfrom sklearn.model_selection import GridSearchCV\n\n# Define scikit-learn models and their hyperparameter grids\nsklearn_models = {\n    'Logistic Regression': {\n        'model': LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),\n        'params': {\n            'C': [0.01, 0.1, 1, 10],\n            'solver': ['liblinear', 'saga']\n        }\n    },\n    'Random Forest': {\n        'model': RandomForestClassifier(random_state=RANDOM_STATE),\n        'params': {\n            'n_estimators': [100, 200],\n            'max_depth': [None, 10, 20],\n            'min_samples_split': [2, 5]\n        }\n    },\n    'Decision Tree': {\n        'model': DecisionTreeClassifier(random_state=RANDOM_STATE),\n        'params': {\n            'max_depth': [None, 10, 20],\n            'min_samples_split': [2, 5, 10]\n        }\n    },\n    'Gradient Boosting': {\n        'model': GradientBoostingClassifier(random_state=RANDOM_STATE),\n        'params': {\n            'n_estimators': [100, 200],\n            'learning_rate': [0.01, 0.1],\n            'max_depth': [3, 5]\n        }\n    }\n}\n\n# Function to perform GridSearchCV with the correct scoring for multiclass classification\ndef perform_grid_search(model, params, X, y):\n    # Use 'f1_weighted' to calculate a weighted F1 score for multiclass classification\n    grid = GridSearchCV(model, params, cv=5, scoring='f1_weighted', n_jobs=-1, verbose=1)\n    grid.fit(X, y)\n    return grid.best_estimator_, grid.best_params_, grid.best_score_\n\n# Perform hyperparameter tuning\nbest_sklearn_models = {}\nfor name, config in sklearn_models.items():\n    print(f\"\\nTuning hyperparameters for {name}...\")\n    best_model, best_params, best_score = perform_grid_search(\n        config['model'], config['params'], X_train_tfidf, y_train\n    )\n    best_sklearn_models[name] = best_model\n    print(f\"Best Parameters for {name}: {best_params}\")\n    print(f\"Best F1 Score: {best_score:.4f}\")\n","metadata":{"execution":{"iopub.status.busy":"2024-09-16T13:48:28.908532Z","iopub.execute_input":"2024-09-16T13:48:28.909176Z"},"trusted":true},"execution_count":null,"outputs":[{"name":"stdout","text":"\nTuning hyperparameters for Logistic Regression...\nFitting 5 folds for each of 8 candidates, totalling 40 fits\nBest Parameters for Logistic Regression: {'C': 0.1, 'solver': 'saga'}\nBest F1 Score: 0.5275\n\nTuning hyperparameters for Random Forest...\nFitting 5 folds for each of 12 candidates, totalling 60 fits\n","output_type":"stream"}]},{"cell_type":"code","source":"","metadata":{},"execution_count":null,"outputs":[]}]}
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "b38956cf",
+   "metadata": {
+    "_cell_guid": "b1076dfc-b9ad-4769-8c92-a6c4dae69d19",
+    "_uuid": "8f2839f25d086af736a60e9eeb907d3b93b6e0e5",
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:18:31.156328Z",
+     "iopub.status.busy": "2024-09-16T14:18:31.155778Z",
+     "iopub.status.idle": "2024-09-16T14:18:31.913995Z",
+     "shell.execute_reply": "2024-09-16T14:18:31.913147Z"
+    },
+    "papermill": {
+     "duration": 0.767049,
+     "end_time": "2024-09-16T14:18:31.916342",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:31.149293",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/kaggle/input/liar-fake-news-detection/myfile.csv\n"
+     ]
+    }
+   ],
+   "source": [
+    "# This Python 3 environment comes with many helpful analytics libraries installed\n",
+    "# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python\n",
+    "# For example, here's several helpful packages to load\n",
+    "\n",
+    "import numpy as np # linear algebra\n",
+    "import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)\n",
+    "\n",
+    "# Input data files are available in the read-only \"../input/\" directory\n",
+    "# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory\n",
+    "\n",
+    "import os\n",
+    "for dirname, _, filenames in os.walk('/kaggle/input'):\n",
+    "    for filename in filenames:\n",
+    "        print(os.path.join(dirname, filename))\n",
+    "\n",
+    "# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using \"Save & Run All\" \n",
+    "# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9b533235",
+   "metadata": {
+    "papermill": {
+     "duration": 0.004291,
+     "end_time": "2024-09-16T14:18:31.925444",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:31.921153",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Imports and Configuration "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "e5e9c1a3",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:18:31.935678Z",
+     "iopub.status.busy": "2024-09-16T14:18:31.935298Z",
+     "iopub.status.idle": "2024-09-16T14:18:46.183019Z",
+     "shell.execute_reply": "2024-09-16T14:18:46.182229Z"
+    },
+    "papermill": {
+     "duration": 14.255661,
+     "end_time": "2024-09-16T14:18:46.185461",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:31.929800",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# Cell 1: Imports and Configuration\n",
+    "\n",
+    "import re\n",
+    "import time\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import matplotlib.pyplot as plt\n",
+    "from matplotlib.figure import Figure\n",
+    "from joblib import Parallel, delayed, dump\n",
+    "import joblib\n",
+    "import seaborn as sns\n",
+    "\n",
+    "from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold\n",
+    "from sklearn.feature_extraction.text import TfidfVectorizer\n",
+    "from sklearn.metrics import (\n",
+    "    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report\n",
+    ")\n",
+    "from sklearn.linear_model import LogisticRegression\n",
+    "from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier\n",
+    "from sklearn.tree import DecisionTreeClassifier\n",
+    "\n",
+    "import tensorflow as tf\n",
+    "from tensorflow.keras.preprocessing.text import Tokenizer\n",
+    "from tensorflow.keras.preprocessing.sequence import pad_sequences\n",
+    "from tensorflow.keras.models import Sequential\n",
+    "from tensorflow.keras.layers import Embedding, LSTM, SimpleRNN, GRU, Conv1D, GlobalMaxPooling1D, Dense\n",
+    "from tensorflow.keras.optimizers import Adam\n",
+    "import keras_tuner as kt\n",
+    "\n",
+    "import warnings\n",
+    "warnings.filterwarnings('ignore')\n",
+    "\n",
+    "# Configuration and Constants\n",
+    "DATA_PATH = '/kaggle/input/liar-fake-news-detection/myfile.csv'  \n",
+    "EMBEDDING_DIM = 100\n",
+    "EPOCHS = 10\n",
+    "BATCH_SIZE = 64\n",
+    "RANDOM_STATE = 42\n",
+    "MODEL_DIR = 'saved_models'\n",
+    "\n",
+    "# Create model directory if it doesn't exist\n",
+    "import os\n",
+    "if not os.path.exists(MODEL_DIR):\n",
+    "    os.makedirs(MODEL_DIR)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3b60f8f4",
+   "metadata": {
+    "papermill": {
+     "duration": 0.00455,
+     "end_time": "2024-09-16T14:18:46.194935",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:46.190385",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Verify GPU Availability"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "30c70c25",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:18:46.205969Z",
+     "iopub.status.busy": "2024-09-16T14:18:46.205427Z",
+     "iopub.status.idle": "2024-09-16T14:18:46.437590Z",
+     "shell.execute_reply": "2024-09-16T14:18:46.436634Z"
+    },
+    "papermill": {
+     "duration": 0.239994,
+     "end_time": "2024-09-16T14:18:46.439602",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:46.199608",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "GPUs Available: 1\n",
+      " - /physical_device:GPU:0\n",
+      "Memory growth set for GPUs.\n"
+     ]
+    }
+   ],
+   "source": [
+    "import tensorflow as tf\n",
+    "\n",
+    "# List available GPUs\n",
+    "gpus = tf.config.list_physical_devices('GPU')\n",
+    "if gpus:\n",
+    "    print(f\"GPUs Available: {len(gpus)}\")\n",
+    "    for gpu in gpus:\n",
+    "        print(f\" - {gpu.name}\")\n",
+    "    # Set memory growth to prevent TensorFlow from allocating all GPU memory\n",
+    "    try:\n",
+    "        for gpu in gpus:\n",
+    "            tf.config.experimental.set_memory_growth(gpu, True)\n",
+    "        print(\"Memory growth set for GPUs.\")\n",
+    "    except RuntimeError as e:\n",
+    "        print(e)\n",
+    "else:\n",
+    "    print(\"No GPU available. Running on CPU.\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8c3d38eb",
+   "metadata": {
+    "papermill": {
+     "duration": 0.004376,
+     "end_time": "2024-09-16T14:18:46.448904",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:46.444528",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "## Enable Mixed Precision"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "601c8308",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:18:46.459862Z",
+     "iopub.status.busy": "2024-09-16T14:18:46.459133Z",
+     "iopub.status.idle": "2024-09-16T14:18:46.464569Z",
+     "shell.execute_reply": "2024-09-16T14:18:46.463626Z"
+    },
+    "papermill": {
+     "duration": 0.013047,
+     "end_time": "2024-09-16T14:18:46.466555",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:46.453508",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Mixed precision policy set to: mixed_float16\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tensorflow.keras import mixed_precision\n",
+    "\n",
+    "# Enable mixed precision\n",
+    "mixed_precision.set_global_policy('mixed_float16')\n",
+    "\n",
+    "print(f\"Mixed precision policy set to: {mixed_precision.global_policy().name}\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e64162d8",
+   "metadata": {
+    "papermill": {
+     "duration": 0.004688,
+     "end_time": "2024-09-16T14:18:46.476039",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:46.471351",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Data Loading and Preprocessing"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "ff5ecce7",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:18:46.486710Z",
+     "iopub.status.busy": "2024-09-16T14:18:46.486403Z",
+     "iopub.status.idle": "2024-09-16T14:18:58.186414Z",
+     "shell.execute_reply": "2024-09-16T14:18:58.185340Z"
+    },
+    "papermill": {
+     "duration": 11.708196,
+     "end_time": "2024-09-16T14:18:58.188860",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:46.480664",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Loading data...\n",
+      "Data loaded with 44866 records.\n",
+      "Preprocessing text data...\n",
+      "Preprocessing completed.\n",
+      "Class distribution:\n",
+      "label\n",
+      "0                                                                                                                                                                                                                                                                                                                                                                       23432\n",
+      "1                                                                                                                                                                                                                                                                                                                                                                       21400\n",
+      " we see Mickey and Mallory driving in an RV as parents. The idea here is that the Knoxes represent a future society                                                                                                                                                                                                                                                         2\n",
+      " another controversial nugget in the JFK files was a memo written by FBI Director Hoover after Oswald was shot by Ruby. The memo revealed that the head of FBI was concerned that the bureau needed to  convince  the public that Oswald acted alone in the Kennedy assassination. A portion of Hoover s memo read The thing I am concerned about                           2\n",
+      " chance and human agency. We have only to reflect upon defunct glacial despotisms such as the USSR or East Germany to realize that nothing is forever.Throughout history                                                                                                                                                                                                    2\n",
+      " while criticizing their conservative counterparts.National Committee for Voting Integrity: This group opposes  the implementation of proof of citizenship and photo identification requirements for eligible electors in American elections as the means of assuring election integrity. National Council for Research on Women: This group supports big government        2\n",
+      " Democratic Congressman Barney Frank                                                                                                                                                                                                                                                                                                                                        1\n",
+      " it s certainly an old lesson by now. Depending on what your view of communism is                                                                                                                                                                                                                                                                                           1\n",
+      " it s much easier to scapegoat an existential enemy for every systemic and institutional crisis affecting America. Whole industries have been spun out of this old habit: the intelligence industry                                                                                                                                                                         1\n",
+      " which owns the Mandalay Bay hotel near where the shooting occurred                                                                                                                                                                                                                                                                                                         1\n",
+      " like the fraudulent story published in The Post                                                                                                                                                                                                                                                                                                                            1\n",
+      " and is heavily funded by Democracy Alliance                                                                                                                                                                                                                                                                                                                                1\n",
+      "Name: count, dtype: int64\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Cell 4: Data Loading and Preprocessing\n",
+    "\n",
+    "def load_data(path):\n",
+    "    df = pd.read_csv(path)\n",
+    "    return df\n",
+    "\n",
+    "def preprocess_text(text):\n",
+    "    text = text.lower()\n",
+    "    text = re.sub(r'https?://\\S+|www\\.\\S+', '', text)  # Remove URLs\n",
+    "    text = re.sub(r'<.*?>', '', text)                 # Remove HTML tags\n",
+    "    text = re.sub(r'[^\\w\\s]', '', text)               # Remove punctuation\n",
+    "    text = re.sub(r'\\d', '', text)                    # Remove digits\n",
+    "    text = re.sub(r'\\n', ' ', text)                   # Replace newline with space\n",
+    "    return text.strip()\n",
+    "\n",
+    "# Load data\n",
+    "print(\"Loading data...\")\n",
+    "df = load_data(DATA_PATH)\n",
+    "print(f\"Data loaded with {df.shape[0]} records.\")\n",
+    "\n",
+    "# Preprocess text\n",
+    "print(\"Preprocessing text data...\")\n",
+    "df['text'] = df['text'].astype(str).apply(preprocess_text)\n",
+    "print(\"Preprocessing completed.\")\n",
+    "\n",
+    "# Check class distribution\n",
+    "print(\"Class distribution:\")\n",
+    "print(df['label'].value_counts())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9b095d43",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005053,
+     "end_time": "2024-09-16T14:18:58.199286",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:58.194233",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Feature Extraction"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "90dbfafa",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:18:58.211130Z",
+     "iopub.status.busy": "2024-09-16T14:18:58.210729Z",
+     "iopub.status.idle": "2024-09-16T14:19:39.027489Z",
+     "shell.execute_reply": "2024-09-16T14:19:39.026479Z"
+    },
+    "papermill": {
+     "duration": 40.82973,
+     "end_time": "2024-09-16T14:19:39.034106",
+     "exception": false,
+     "start_time": "2024-09-16T14:18:58.204376",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Number of NaN values in 'label' column before cleaning: 20\n",
+      "Number of NaN values in 'text' column before cleaning: 0\n",
+      "Number of NaN values in 'label' column after cleaning: 0\n",
+      "Number of NaN values in 'text' column after cleaning: 0\n",
+      "\n",
+      "Class distribution after cleaning:\n",
+      "label\n",
+      "0                                                                                                                                                                                                                                                                                                                                                                       23432\n",
+      "1                                                                                                                                                                                                                                                                                                                                                                       21400\n",
+      " we see Mickey and Mallory driving in an RV as parents. The idea here is that the Knoxes represent a future society                                                                                                                                                                                                                                                         2\n",
+      " another controversial nugget in the JFK files was a memo written by FBI Director Hoover after Oswald was shot by Ruby. The memo revealed that the head of FBI was concerned that the bureau needed to  convince  the public that Oswald acted alone in the Kennedy assassination. A portion of Hoover s memo read The thing I am concerned about                           2\n",
+      " chance and human agency. We have only to reflect upon defunct glacial despotisms such as the USSR or East Germany to realize that nothing is forever.Throughout history                                                                                                                                                                                                    2\n",
+      " while criticizing their conservative counterparts.National Committee for Voting Integrity: This group opposes  the implementation of proof of citizenship and photo identification requirements for eligible electors in American elections as the means of assuring election integrity. National Council for Research on Women: This group supports big government        2\n",
+      " Democratic Congressman Barney Frank                                                                                                                                                                                                                                                                                                                                        1\n",
+      " it s certainly an old lesson by now. Depending on what your view of communism is                                                                                                                                                                                                                                                                                           1\n",
+      " it s much easier to scapegoat an existential enemy for every systemic and institutional crisis affecting America. Whole industries have been spun out of this old habit: the intelligence industry                                                                                                                                                                         1\n",
+      " which owns the Mandalay Bay hotel near where the shooting occurred                                                                                                                                                                                                                                                                                                         1\n",
+      " like the fraudulent story published in The Post                                                                                                                                                                                                                                                                                                                            1\n",
+      " and is heavily funded by Democracy Alliance                                                                                                                                                                                                                                                                                                                                1\n",
+      "Name: count, dtype: int64\n",
+      "\n",
+      "Class distribution after filtering classes with <2 samples:\n",
+      "label\n",
+      "0                                                                                                                                                                                                                                                                                                                                                                       23432\n",
+      "1                                                                                                                                                                                                                                                                                                                                                                       21400\n",
+      " another controversial nugget in the JFK files was a memo written by FBI Director Hoover after Oswald was shot by Ruby. The memo revealed that the head of FBI was concerned that the bureau needed to  convince  the public that Oswald acted alone in the Kennedy assassination. A portion of Hoover s memo read The thing I am concerned about                           2\n",
+      " we see Mickey and Mallory driving in an RV as parents. The idea here is that the Knoxes represent a future society                                                                                                                                                                                                                                                         2\n",
+      " chance and human agency. We have only to reflect upon defunct glacial despotisms such as the USSR or East Germany to realize that nothing is forever.Throughout history                                                                                                                                                                                                    2\n",
+      " while criticizing their conservative counterparts.National Committee for Voting Integrity: This group opposes  the implementation of proof of citizenship and photo identification requirements for eligible electors in American elections as the means of assuring election integrity. National Council for Research on Women: This group supports big government        2\n",
+      "Name: count, dtype: int64\n",
+      "\n",
+      "Training set: 33630 samples\n",
+      "Testing set: 11210 samples\n",
+      "\n",
+      "Vectorizing text data using TF-IDF...\n",
+      "TF-IDF vectorization completed.\n",
+      "\n",
+      "Tokenizing and padding text data for TensorFlow models...\n",
+      "Vocabulary Size: 181683\n",
+      "Maximum Sequence Length: 5424\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Cell 5: Feature Extraction with Data Cleaning\n",
+    "\n",
+    "import pandas as pd\n",
+    "import re\n",
+    "from sklearn.model_selection import train_test_split\n",
+    "from sklearn.feature_extraction.text import TfidfVectorizer\n",
+    "from tensorflow.keras.preprocessing.text import Tokenizer\n",
+    "from tensorflow.keras.preprocessing.sequence import pad_sequences\n",
+    "\n",
+    "# Function to preprocess text\n",
+    "def preprocess_text(text):\n",
+    "    text = text.lower()\n",
+    "    text = re.sub(r'https?://\\S+|www\\.\\S+', '', text)  # Remove URLs\n",
+    "    text = re.sub(r'<.*?>', '', text)                 # Remove HTML tags\n",
+    "    text = re.sub(r'[^\\w\\s]', '', text)               # Remove punctuation\n",
+    "    text = re.sub(r'\\d', '', text)                    # Remove digits\n",
+    "    text = re.sub(r'\\n', ' ', text)                   # Replace newline with space\n",
+    "    return text.strip()\n",
+    "\n",
+    "# Check for NaN values in the 'label' and 'text' columns\n",
+    "num_nan_labels = df['label'].isnull().sum()\n",
+    "num_nan_text = df['text'].isnull().sum()\n",
+    "print(f\"Number of NaN values in 'label' column before cleaning: {num_nan_labels}\")\n",
+    "print(f\"Number of NaN values in 'text' column before cleaning: {num_nan_text}\")\n",
+    "\n",
+    "# Remove rows with NaN in 'label' or 'text'\n",
+    "df_clean = df.dropna(subset=['label', 'text'])\n",
+    "\n",
+    "# Verify that there are no NaN values in 'label' and 'text' after cleaning\n",
+    "num_nan_labels_after = df_clean['label'].isnull().sum()\n",
+    "num_nan_text_after = df_clean['text'].isnull().sum()\n",
+    "print(f\"Number of NaN values in 'label' column after cleaning: {num_nan_labels_after}\")\n",
+    "print(f\"Number of NaN values in 'text' column after cleaning: {num_nan_text_after}\")\n",
+    "\n",
+    "# Check class distribution after cleaning\n",
+    "class_counts = df_clean['label'].value_counts()\n",
+    "print(\"\\nClass distribution after cleaning:\")\n",
+    "print(class_counts)\n",
+    "\n",
+    "# Identify classes with at least 2 samples\n",
+    "valid_classes = class_counts[class_counts >= 2].index.tolist()\n",
+    "\n",
+    "# Filter the dataframe to include only valid classes\n",
+    "df_clean = df_clean[df_clean['label'].isin(valid_classes)]\n",
+    "\n",
+    "# Recheck class distribution after filtering\n",
+    "class_counts_after_filter = df_clean['label'].value_counts()\n",
+    "print(\"\\nClass distribution after filtering classes with <2 samples:\")\n",
+    "print(class_counts_after_filter)\n",
+    "\n",
+    "# Assign features and target from the cleaned dataframe\n",
+    "X = df_clean['text']\n",
+    "y = df_clean['label']\n",
+    "\n",
+    "# Check if at least two classes are present\n",
+    "if y.nunique() < 2:\n",
+    "    raise ValueError(\"Not enough classes with at least two samples each for stratified splitting.\")\n",
+    "TEST_SIZE = .25\n",
+    "# Perform train-test split with stratification to maintain class distribution\n",
+    "X_train, X_test, y_train, y_test = train_test_split(\n",
+    "    X, y,\n",
+    "    test_size=TEST_SIZE,\n",
+    "    random_state=RANDOM_STATE,\n",
+    "    stratify=y\n",
+    ")\n",
+    "\n",
+    "print(f\"\\nTraining set: {X_train.shape[0]} samples\")\n",
+    "print(f\"Testing set: {X_test.shape[0]} samples\")\n",
+    "\n",
+    "# --- Feature Extraction Steps ---\n",
+    "\n",
+    "# TF-IDF Vectorization for scikit-learn models\n",
+    "print(\"\\nVectorizing text data using TF-IDF...\")\n",
+    "tfidf_vectorizer = TfidfVectorizer(max_features=10000)\n",
+    "X_train_tfidf = tfidf_vectorizer.fit_transform(X_train)\n",
+    "X_test_tfidf = tfidf_vectorizer.transform(X_test)\n",
+    "print(\"TF-IDF vectorization completed.\")\n",
+    "\n",
+    "# Tokenization and padding for TensorFlow models\n",
+    "print(\"\\nTokenizing and padding text data for TensorFlow models...\")\n",
+    "tokenizer = Tokenizer()\n",
+    "tokenizer.fit_on_texts(X_train)\n",
+    "sequences_train = tokenizer.texts_to_sequences(X_train)\n",
+    "sequences_test = tokenizer.texts_to_sequences(X_test)\n",
+    "\n",
+    "vocab_size = len(tokenizer.word_index) + 1\n",
+    "max_length = max(len(seq) for seq in sequences_train)\n",
+    "X_train_padded = pad_sequences(sequences_train, maxlen=max_length, padding='post')\n",
+    "X_test_padded = pad_sequences(sequences_test, maxlen=max_length, padding='post')\n",
+    "print(f\"Vocabulary Size: {vocab_size}\")\n",
+    "print(f\"Maximum Sequence Length: {max_length}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2a4c434d",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005105,
+     "end_time": "2024-09-16T14:19:39.044712",
+     "exception": false,
+     "start_time": "2024-09-16T14:19:39.039607",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "## Optimize Data Pipeline for TensorFlow Models"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "6bc181ca",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:19:39.056522Z",
+     "iopub.status.busy": "2024-09-16T14:19:39.056207Z",
+     "iopub.status.idle": "2024-09-16T14:19:40.297906Z",
+     "shell.execute_reply": "2024-09-16T14:19:40.296834Z"
+    },
+    "papermill": {
+     "duration": 1.250172,
+     "end_time": "2024-09-16T14:19:40.300102",
+     "exception": false,
+     "start_time": "2024-09-16T14:19:39.049930",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "TensorFlow datasets created with optimized data pipeline.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Cell 6: Optimize Data Pipeline for TensorFlow Models\n",
+    "\n",
+    "# Convert labels to numpy arrays\n",
+    "y_train_tf = y_train.values\n",
+    "y_test_tf = y_test.values\n",
+    "\n",
+    "# Create TensorFlow datasets\n",
+    "train_dataset = tf.data.Dataset.from_tensor_slices((X_train_padded, y_train_tf))\n",
+    "train_dataset = train_dataset.shuffle(buffer_size=1024).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)\n",
+    "\n",
+    "test_dataset = tf.data.Dataset.from_tensor_slices((X_test_padded, y_test_tf))\n",
+    "test_dataset = test_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)\n",
+    "\n",
+    "print(\"TensorFlow datasets created with optimized data pipeline.\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0243b0ac",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005209,
+     "end_time": "2024-09-16T14:19:40.311155",
+     "exception": false,
+     "start_time": "2024-09-16T14:19:40.305946",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "## Hyperparameter Tuning for scikit-learn Models"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "a15ecd61",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T14:19:40.323103Z",
+     "iopub.status.busy": "2024-09-16T14:19:40.322777Z",
+     "iopub.status.idle": "2024-09-16T22:48:04.953497Z",
+     "shell.execute_reply": "2024-09-16T22:48:04.952391Z"
+    },
+    "papermill": {
+     "duration": 30504.645485,
+     "end_time": "2024-09-16T22:48:04.962004",
+     "exception": false,
+     "start_time": "2024-09-16T14:19:40.316519",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "Tuning hyperparameters for Logistic Regression...\n",
+      "Fitting 5 folds for each of 8 candidates, totalling 40 fits\n",
+      "Best Parameters for Logistic Regression: {'C': 0.1, 'solver': 'saga'}\n",
+      "Best F1 Score: 0.5275\n",
+      "\n",
+      "Tuning hyperparameters for Random Forest...\n",
+      "Fitting 5 folds for each of 12 candidates, totalling 60 fits\n",
+      "Best Parameters for Random Forest: {'max_depth': 20, 'min_samples_split': 2, 'n_estimators': 200}\n",
+      "Best F1 Score: 0.5287\n",
+      "\n",
+      "Tuning hyperparameters for Decision Tree...\n",
+      "Fitting 5 folds for each of 9 candidates, totalling 45 fits\n",
+      "Best Parameters for Decision Tree: {'max_depth': 10, 'min_samples_split': 10}\n",
+      "Best F1 Score: 0.5494\n",
+      "\n",
+      "Tuning hyperparameters for Gradient Boosting...\n",
+      "Fitting 5 folds for each of 8 candidates, totalling 40 fits\n",
+      "Best Parameters for Gradient Boosting: {'learning_rate': 0.01, 'max_depth': 3, 'n_estimators': 100}\n",
+      "Best F1 Score: 0.5511\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Cell 7: Hyperparameter Tuning for scikit-learn Models (Multiclass Support)\n",
+    "\n",
+    "from sklearn.model_selection import GridSearchCV\n",
+    "\n",
+    "# Define scikit-learn models and their hyperparameter grids\n",
+    "sklearn_models = {\n",
+    "    'Logistic Regression': {\n",
+    "        'model': LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),\n",
+    "        'params': {\n",
+    "            'C': [0.01, 0.1, 1, 10],\n",
+    "            'solver': ['liblinear', 'saga']\n",
+    "        }\n",
+    "    },\n",
+    "    'Random Forest': {\n",
+    "        'model': RandomForestClassifier(random_state=RANDOM_STATE),\n",
+    "        'params': {\n",
+    "            'n_estimators': [100, 200],\n",
+    "            'max_depth': [None, 10, 20],\n",
+    "            'min_samples_split': [2, 5]\n",
+    "        }\n",
+    "    },\n",
+    "    'Decision Tree': {\n",
+    "        'model': DecisionTreeClassifier(random_state=RANDOM_STATE),\n",
+    "        'params': {\n",
+    "            'max_depth': [None, 10, 20],\n",
+    "            'min_samples_split': [2, 5, 10]\n",
+    "        }\n",
+    "    },\n",
+    "    'Gradient Boosting': {\n",
+    "        'model': GradientBoostingClassifier(random_state=RANDOM_STATE),\n",
+    "        'params': {\n",
+    "            'n_estimators': [100, 200],\n",
+    "            'learning_rate': [0.01, 0.1],\n",
+    "            'max_depth': [3, 5]\n",
+    "        }\n",
+    "    }\n",
+    "}\n",
+    "\n",
+    "# Function to perform GridSearchCV with the correct scoring for multiclass classification\n",
+    "def perform_grid_search(model, params, X, y):\n",
+    "    # Use 'f1_weighted' to calculate a weighted F1 score for multiclass classification\n",
+    "    grid = GridSearchCV(model, params, cv=5, scoring='f1_weighted', n_jobs=-1, verbose=1)\n",
+    "    grid.fit(X, y)\n",
+    "    return grid.best_estimator_, grid.best_params_, grid.best_score_\n",
+    "\n",
+    "# Perform hyperparameter tuning\n",
+    "best_sklearn_models = {}\n",
+    "for name, config in sklearn_models.items():\n",
+    "    print(f\"\\nTuning hyperparameters for {name}...\")\n",
+    "    best_model, best_params, best_score = perform_grid_search(\n",
+    "        config['model'], config['params'], X_train_tfidf, y_train\n",
+    "    )\n",
+    "    best_sklearn_models[name] = best_model\n",
+    "    print(f\"Best Parameters for {name}: {best_params}\")\n",
+    "    print(f\"Best F1 Score: {best_score:.4f}\")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ae742615",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005565,
+     "end_time": "2024-09-16T22:48:04.973374",
+     "exception": false,
+     "start_time": "2024-09-16T22:48:04.967809",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "gpu",
+   "dataSources": [
+    {
+     "datasetId": 5716008,
+     "sourceId": 9412550,
+     "sourceType": "datasetVersion"
+    }
+   ],
+   "dockerImageVersionId": 30761,
+   "isGpuEnabled": true,
+   "isInternetEnabled": false,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.10.14"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 30579.287992,
+   "end_time": "2024-09-16T22:48:07.697830",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2024-09-16T14:18:28.409838",
+   "version": "2.6.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
